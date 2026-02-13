@@ -635,22 +635,25 @@ def DS_gb_misori_calc(DS, grain_ids=None, crystal_system='cubic', plot_flag=True
                     iter_time = cur_time
                 if not gb_mask[c,i,j] or DS['labels'][c,i,j]==-1:
                     continue
-                R0 = mean_ori_map[c,i,j,:,:]
+                g0 = np.unravel_index(np.argmin(abs(DS['labels'] - DS['labels'][c,i,j])), DS['labels'].shape)
+                R0 = mean_ori_map[*g0,:,:]
                 #Loop through surrounding neigbhors
                 do_loop = True
                 for dc, di, dj in [(-1,0,0),(1,0,0),(0,-1,0), (0,1,0), (0,0,-1), (0,0,1)]:
                     nc, ni, nj = c+dc, i + di, j + dj
-                    #Remove grain boundaries on the sample boundarygit
-                    if 0 <= nc < Z and 0 <= ni < Y and 0 <= nj < X and DS['labels'][nc,ni,nj]==-1:
+                    #Remove grain boundaries on the sample boundary
+                    if 0 <= nc < Z and 0 <= ni < Y and 0 <= nj < X and DS['labels'][c,ni,nj]==-1:
                         do_loop = False
                 if do_loop:
                     for dc, di, dj in [(-1,0,0),(1,0,0),(0,-1,0), (0,1,0), (0,0,-1), (0,0,1)]:
                         nc, ni, nj = c+dc, i + di, j + dj
                         if 0 <= nc < Z and 0 <= ni < Y and 0 <= nj < X:
-                            R1 = mean_ori_map[nc,ni,nj,:,:]
-                            angles, axes, axes_xyz = disorientation(R0, R1, crystal_structure=crystal_structure)
-                            gb_mis_map[c,i,j] = np.rad2deg(angles)
-                            break
+                            g1 = np.unravel_index(np.argmin(abs(DS['labels'] - DS['labels'][c,ni,nj])), DS['labels'].shape)
+                            if g1 != g0:
+                                R1 = mean_ori_map[*g1,:,:]
+                                angles, axes, axes_xyz = disorientation(R0, R1, crystal_structure=crystal_structure)
+                                gb_mis_map[c,i,j] = np.rad2deg(angles)
+                                break
     return gb_mis_map
     
 def DS_IGM_calc(DS, grain_ids=None, crystal_system='cubic', plot_flag=True):
