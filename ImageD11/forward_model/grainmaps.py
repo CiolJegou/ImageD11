@@ -559,6 +559,103 @@ def DS_to_paraview(DS, h5name = 'DS.h5'):
     print('Done with writing xdmf file to {}'.format(xdmf_filename))
 
 
+def DS_mean_ori_calc(DS, grain_ids=None, plot_flag=True):
+    """
+    compute the misorientation on grain boundaries
+    Args:
+        DS                -- grain map dictionary, gm = grainmap(tensor_map_file); DS = gm.DS
+        grain_ids         -- list of grain label IDs to compute, None means compute all grains
+        plot_flag         -- plot flag
+    Returns:
+        mean_roi               -- mean_ori map as matrices
+    """
+    def u2rod(Us):
+        rod = np.zeros((Us.shape[0], 3), dtype='float')
+        for i, U in enumerate(Us):
+            rod[i,:] = ori_converter.quat2rod(ori_converter.u2quat(U))
+        return rod
+            
+    mean_ori_map = np.zeros(DS['U'].shape)
+    grain_ids = np.unique(DS['labels'])
+    for gid in grain_ids:
+        if gid > -1:
+            gid_mask = (DS['labels'] == gid) & (~np.isnan(DS['U'][..., 0, 0]))
+            gid_ind = np.argwhere(gid_mask)
+            if gid_ind.size > 0:
+                Us = DS['U'][gid_ind[:,0], gid_ind[:,1], gid_ind[:,2], :, :]
+                rods = u2rod(Us)
+                rod_mean = get_mean_rod(rods)
+                U_mean = ori_converter.quat2u(ori_converter.rod2quat(rod_mean))
+                mean_ori_map+=gid_mask[..., np.newaxis, np.newaxis]*U_mean
+    return mean_ori_map
+
+def DS_gb_misori_calc(DS, grain_ids=None, crystal_system='cubic', plot_flag=True):
+    """
+    compute the misorientation on grain boundaries. 
+    This function only compares the mean orientation of 2 grains
+    Args:
+        DS                -- grain map dictionary, gm = grainmap(tensor_map_file); DS = gm.DS
+        grain_ids         -- list of grain label IDs to compute, None means compute all grains
+        mean              -- Use the mean orientation value of the grain to compute the misorientation
+        crystal_system    -- crystal system name one of ['cubic', 'hexagonal', 'orthorhombic', 'tetragonal', 'trigonal', 'monoclinic', 'triclinic']
+        plot_flag         -- plot flag
+    Returns:
+        gb_mis_map               -- gb_mis_map, angle in degrees
+    """   
+    if crystal_system in ['cubic', 'hexagonal', 'orthorhombic', 'tetragonal', 'trigonal', 'monoclinic', 'triclinic']:
+        print('{} is OK'.format(crystal_system))
+        crystal_structure = Symmetry[crystal_system]
+    else:
+        raise ValueError('{} is not supported.'.format(crystal_system))
+        
+    Z, Y, X = DS['labels'].shape
+    gb_mis_map = np.full((Z, Y, X), np.nan)
+    #Get a grain boundary mask
+    gb_mask = np.zeros((Z, Y, X), dtype=bool)
+    #Only 1 boundary (to get single pixel boundary), in the - direction 
+    gb_mask[:,:-1, :] |= DS['labels'][:,:-1, :] != DS['labels'][:,1:, :]   # -Y
+    gb_mask[:,:, :-1] |= DS['labels'][:,:, :-1] != DS['labels'][:,:, 1:]   # -X
+    gb_mask[:-1, :, :] |= DS['labels'][:-1,:, :] != DS['labels'][1:,:, :]   # -Z
+    print('Computing the mean orientation map:')
+    start_time = time.time()
+    mean_ori_map = DS_mean_ori_calc(DS, grain_ids=None, plot_flag=True)
+    end_time = time.time()
+    print('elapsed time: {:.2f}s'.format(end_time-start_time))
+    cXY = 0
+    maxiter = X*Y
+    intiter = int(0.1*maxiter)
+    iter_time = time.time()
+    for c in range(Z):
+        for i in range(Y):
+            for j in range(X):
+                if (i*j)>=intiter*cXY:
+                    cur_time = time.time()
+                    print('Done {}% - {:.2f}s'.format(cXY*10, cur_time-iter_time))
+                    cXY+=1
+                    iter_time = cur_time
+                if not gb_mask[c,i,j] or DS['labels'][c,i,j]==-1:
+                    continue
+                g0 = np.unravel_index(np.argmin(abs(DS['labels'] - DS['labels'][c,i,j])), DS['labels'].shape)
+                R0 = mean_ori_map[*g0,:,:]
+                #Loop through surrounding neigbhors
+                do_loop = True
+                for dc, di, dj in [(-1,0,0),(1,0,0),(0,-1,0), (0,1,0), (0,0,-1), (0,0,1)]:
+                    nc, ni, nj = c+dc, i + di, j + dj
+                    #Remove grain boundaries on the sample boundary
+                    if 0 <= nc < Z and 0 <= ni < Y and 0 <= nj < X and DS['labels'][c,ni,nj]==-1:
+                        do_loop = False
+                if do_loop:
+                    for dc, di, dj in [(-1,0,0),(1,0,0),(0,-1,0), (0,1,0), (0,0,-1), (0,0,1)]:
+                        nc, ni, nj = c+dc, i + di, j + dj
+                        if 0 <= nc < Z and 0 <= ni < Y and 0 <= nj < X:
+                            g1 = np.unravel_index(np.argmin(abs(DS['labels'] - DS['labels'][c,ni,nj])), DS['labels'].shape)
+                            if g1 != g0:
+                                R1 = mean_ori_map[*g1,:,:]
+                                angles, axes, axes_xyz = disorientation(R0, R1, crystal_structure=crystal_structure)
+                                gb_mis_map[c,i,j] = np.rad2deg(angles)
+                                break
+    return gb_mis_map
+    
 def DS_IGM_calc(DS, grain_ids=None, crystal_system='cubic', plot_flag=True):
     """
     compute intragranular misorientation (IGM) for each grain
