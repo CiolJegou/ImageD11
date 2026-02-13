@@ -637,7 +637,7 @@ def DS_gb_misori_calc(DS, grain_ids=None, crystal_system='cubic', plot_flag=True
                     continue
                 g0 = np.unravel_index(np.argmin(abs(DS['labels'] - DS['labels'][c,i,j])), DS['labels'].shape)
                 # R0 = mean_ori_map[*g0,:,:]
-                R0 = mean_ori_map[g0[0],, g0[1], g0[2],:,:]
+                R0 = mean_ori_map[g0[0], g0[1], g0[2],:,:]
                 #Loop through surrounding neigbhors
                 do_loop = True
                 for dc, di, dj in [(-1,0,0),(1,0,0),(0,-1,0), (0,1,0), (0,0,-1), (0,0,1)]:
@@ -652,7 +652,7 @@ def DS_gb_misori_calc(DS, grain_ids=None, crystal_system='cubic', plot_flag=True
                             g1 = np.unravel_index(np.argmin(abs(DS['labels'] - DS['labels'][c,ni,nj])), DS['labels'].shape)
                             if g1 != g0:
                                 # R1 = mean_ori_map[*g1,:,:]
-                                R1 = mean_ori_map[g1[0],, g1[1], g1[2],:,:]
+                                R1 = mean_ori_map[g1[0], g1[1], g1[2],:,:]
                                 angles, axes, axes_xyz = disorientation(R0, R1, crystal_structure=crystal_structure)
                                 gb_mis_map[c,i,j] = np.rad2deg(angles)
                                 break
