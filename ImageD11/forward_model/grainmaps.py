@@ -1432,7 +1432,7 @@ def DS_KAM_parallel(DS, kernel_size=5, kernel_cutoff=50, crystal_system='cubic',
                 return (k, i, j, angle_mean, coo_neighbors)
             else:
                 return (k, i, j, fill_value, coo_neighbors)
-        print(f"Processing {len(valid_coords)} valid voxels with n_jobs={n_jobs}...")
+        print("Processing {} valid voxels with n_jobs={}...".format(len(valid_coords), n_jobs))
         results = Parallel(n_jobs=n_jobs, verbose=5)(
             delayed(process_voxel)(k, i, j, min_angle, max_angle, fill_value) for k, i, j in valid_coords
         )
@@ -1450,7 +1450,7 @@ def DS_KAM_parallel(DS, kernel_size=5, kernel_cutoff=50, crystal_system='cubic',
             if mask[k, i, j]
             for c in find_neighbors(np.array([k, i, j]), kernel)
         ]
-        print(f"Processing {len(pairs)} pairs across {n_jobs} jobs...")
+        print("Processing {} valid voxels with n_jobs={}...".format(len(pairs), n_jobs))
         def compute_umis(k, i, j, U_center, U_neighbor, min_angle, max_angle, fill_value):
             if np.allclose(U_center, 0) or np.allclose(U_neighbor, 0):
                 return (k, i, j, fill_value)
@@ -1562,7 +1562,7 @@ def DS_misori_parallel(DS, crystal_system = 'cubic', kernel_size = 5, fill_value
             # angles[(angles >= min_angle) & (angles <= max_angle)];
             angle_mean = np.nanmean(angles)
             return (k, i, j, angle_mean)
-        print(f"Processing {len(valid_coords)} valid voxels with n_jobs={n_jobs}...")
+        print("Processing {} valid voxels with n_jobs={}...".format(len(valid_coords), n_jobs))
         results = Parallel(n_jobs=n_jobs, verbose=5)(
             delayed(process_voxel)(k, i, j) for k, i, j in valid_coords
         )
@@ -1580,7 +1580,7 @@ def DS_misori_parallel(DS, crystal_system = 'cubic', kernel_size = 5, fill_value
             if gb[k, i, j]
             for c in find_neighbors(np.array([k, i, j]), kernel)
         ]
-        print(f"Processing {len(pairs)} pairs across {n_jobs} jobs...")
+        print("Processing {} valid voxels with n_jobs={}...".format(len(pairs), n_jobs))
         def compute_umis(k, i, j, U_center, U_neighbor):
             if np.allclose(U_center, 0) or np.allclose(U_neighbor, 0):
                 return (k, i, j, np.nan)
