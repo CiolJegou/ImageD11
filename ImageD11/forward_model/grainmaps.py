@@ -1019,7 +1019,305 @@ def get_mean_rod(rod, kmeans_flag=False, auto_check = True):
     
     return rod_mean
 
+def gaussian(x,mu=0,std=1):
+    """
+    gaussian function
+    """
+    g = 1/(std*(2*np.pi)**0.5)*np.exp(-0.5*(x-mu)**2/std**2)
+    return g
+    
+def KAM_kernel(kernel_size = 5, kernel_cutoff = 50):
+    """
+    create a gaussian kernel of KxKxK dimensions, binarized it upon thresh value (%)
+    TODO: non-square kernel size, 
+    Args:
+        kernel_size     -- int, size of the kernel
+        kernel_cutoff    -- int, threshold value for the gaussian cutoff (in percentage)
+    Returns:
+        kernel_bin      -- binarized kernel for KAM computation
+    """
+    x = np.linspace(-int(kernel_size/2), int(kernel_size/2), kernel_size)
+    #Create a 3d grid with points coordinates
+    kernel_grid = np.meshgrid(x,x,x)
+    #Create the final kernel shape
+    kernel = np.zeros(kernel_grid[0].shape)
+    for i in range(kernel.shape[0]):
+        for j in range(kernel.shape[1]):
+            for k in range(kernel.shape[2]):
+                x_coo = kernel_grid[0][i,j,k]
+                y_coo = kernel_grid[1][i,j,k]
+                z_coo = kernel_grid[2][i,j,k]
+                dist_from_center = np.linalg.norm((x_coo, y_coo, z_coo))
+                gauss_value = gaussian(dist_from_center)
+                kernel[i,j,k] = gauss_value
+    cutoff = np.percentile(kernel, kernel_cutoff)
+    kernel_bin = np.where(kernel>cutoff, 1, 0)
+    return kernel_bin
 
+def find_neighbors(voxel_coo, kernel):
+    """
+    Find all the neighbors coordinates of one pixel given a kernel 
+    Args:
+        voxel_coo       -- coordinates of the xovel (Z,Y,X)
+        kernel          -- (KxKxK) matrix
+    Returns:
+        coo_neighbors   -- list of coordinates
+    """
+    coo_neighbors = np.argwhere(abs(kernel) == 1) + voxel_coo + np.array([-int(kernel.shape[0]/2),-int(kernel.shape[1]/2),-int(kernel.shape[2]/2)])
+    return coo_neighbors
+
+def DS_KAM_parallel(DS, kernel_size=5, kernel_cutoff=50, crystal_system='cubic',
+                           misorientation_threshold=(0, 10), fill_value=np.nan, n_jobs=-1, 
+                           Umis=True):
+    """
+    compute Kernal Average Misorientation (KAM) on the grainmap (parallelized with joblib)
+    Args:
+        DS                          -- grain map 
+        kernel_size                 -- int, size of the kernel
+        kernel_cutoff               -- int, threshold value for the gaussian cutoff (in percentage)
+        crystal_system              -- crystal system name as str
+        misorientation_threshold    -- tuple, Reject misorientations outside specified range.
+        fill_value                  -- To put where mask is false. Defaults to np.nan.
+        n_jobs                      -- Number of parallel jobs. -1 uses all available cores.
+        Umis                        -- Use Umis instead of disori list
+    Returns:
+        KAM                         -- KAM map in degrees (Z,Y,X)
+    """
+    if isinstance(kernel_size, int):
+        kernel = KAM_kernel(kernel_size, kernel_cutoff)
+    else:
+        raise ValueError('{} is not supported for kernel size, must be an int.'.format(kernel_size))
+    if crystal_system in ['cubic', 'hexagonal', 'orthorhombic', 'tetragonal', 'trigonal', 'monoclinic', 'triclinic']:
+        print('{} is OK'.format(crystal_system))
+        crystal_structure = Symmetry[crystal_system]
+    else:
+        raise ValueError('{} is not supported.'.format(crystal_system))
+    if Umis:
+        Umis_list = ['triclinic', 'monoclinic', 'orthorombic', 'tetragonal','trigonal', 'hexagonal', 'cubic']
+        n_Umis = Umis_list.index(crystal_system.lower())+1
+        try:
+            from xfab.symmetry import Umis
+        except ImportError:
+            raise ImportError('Can not import Umis from xfab, defaulting to disori_list')
+            Umis =False
+    assert 'labels' in DS.keys(), 'DS keys must contain "labels"'
+    mask = np.where(DS['labels'] > -1, 1, 0)
+    lower_bound = misorientation_threshold[0]
+    upper_bound = misorientation_threshold[1]
+    
+    #### Adding some padding ####
+    pad_width = [(int(kernel_size/2+1), int(kernel_size/2+1)),   # axis 0 (Z axis) --> add 1 slice before and 1 after
+                (int(kernel_size/2+1), int(kernel_size/2+1)),   # axis 1
+                (int(kernel_size/2+1), int(kernel_size/2+1)),   # axis 2
+                (0, 0),   # axis 3
+                (0, 0)]   # axis 4
+    pad_width_mask = [(int(kernel_size/2+1), int(kernel_size/2+1)),   # axis 0 --> add 1 slice before and 1 after
+                    (int(kernel_size/2+1), int(kernel_size/2+1)),   # axis 1
+                    (int(kernel_size/2+1), int(kernel_size/2+1))]   # axis 2
+    orientation_map = np.pad(DS['U'], pad_width, mode='constant', constant_values=0)
+    mask = np.pad(mask, pad_width_mask, mode='constant', constant_values=False)
+    q = kernel.shape[0] // 2
+    m = kernel.shape[1] // 2
+    n = kernel.shape[2] // 2
+    min_angle = misorientation_threshold[0]
+    max_angle = misorientation_threshold[1]
+    # Using disorientation_list
+    if Umis ==False:
+            # --- Collect all valid voxel coordinates ---
+        valid_coords = [
+            (k, i, j)
+            for k in range(q, orientation_map.shape[0] - q)
+            for i in range(m, orientation_map.shape[1] - m)
+            for j in range(n, orientation_map.shape[2] - n)
+            if mask[k, i, j]
+        ]
+        def process_voxel(k, i, j, min_angle, max_angle, fill_value = np.nan):
+            """For one voxel: gather neighbors, call disorientation_list, return mean angle."""
+            coo_neighbors = find_neighbors(np.array([k, i, j]), kernel)
+            center = orientation_map[k, i, j]                              # (3, 3)
+            neighbors = np.array([orientation_map[c[0], c[1], c[2]].T
+                                   for c in coo_neighbors])                # (K, 3, 3)
+            centers = np.tile(center.T, (len(neighbors), 1, 1))              # (K, 3, 3)
+            angles, _, _ = disorientation_list(centers, neighbors, crystal_structure)
+            angles = np.rad2deg(np.array(angles))
+            
+            for g in range(len(angles)):
+                if np.allclose(neighbors[g], 0) or np.allclose(centers[g], 0):
+                    angles[g] = np.nan
+            thresh_angle = angles[(angles >= min_angle) & (angles <= max_angle)];
+            angle_mean = np.nanmean(thresh_angle)
+            if angle_mean >= min_angle and angle_mean <= max_angle:
+                return (k, i, j, angle_mean, coo_neighbors)
+            else:
+                return (k, i, j, fill_value, coo_neighbors)
+        print(f"Processing {len(valid_coords)} valid voxels with n_jobs={n_jobs}...")
+        results = Parallel(n_jobs=n_jobs, verbose=5)(
+            delayed(process_voxel)(k, i, j, min_angle, max_angle, fill_value) for k, i, j in valid_coords
+        )
+        # build kammap
+        kam_map = np.full(orientation_map.shape[:3], fill_value)
+        for k, i, j, val, coo in results:
+            kam_map[k, i, j] = val
+    else:
+        # Each valid voxel contributes K pairs (one per neighbor)
+        pairs = [
+            (k, i, j, orientation_map[k, i, j], orientation_map[c[0], c[1], c[2]])
+            for k in range(q, orientation_map.shape[0] - q)
+            for i in range(m, orientation_map.shape[1] - m)
+            for j in range(n, orientation_map.shape[2] - n)
+            if mask[k, i, j]
+            for c in find_neighbors(np.array([k, i, j]), kernel)
+        ]
+        print(f"Processing {len(pairs)} pairs across {n_jobs} jobs...")
+        def compute_umis(k, i, j, U_center, U_neighbor, min_angle, max_angle, fill_value):
+            if np.allclose(U_center, 0) or np.allclose(U_neighbor, 0):
+                return (k, i, j, fill_value)
+                
+            angle = Umis(U_center, U_neighbor, n_Umis)[:,1].min()
+            if angle >= min_angle and angle <= max_angle:
+                return (k, i, j, angle)
+            else:
+                return (k, i, j, fill_value)
+        results = Parallel(n_jobs=n_jobs, verbose=5)(
+            delayed(compute_umis)(k, i, j, U_c, U_n, min_angle, max_angle, fill_value) for k, i, j, U_c, U_n in pairs
+        )
+        # --- Accumulate angles per voxel then average ---
+        from collections import defaultdict
+        voxel_angles = defaultdict(list)
+        #each voxel position is associated with the misroi angle corresponding
+        for k, i, j, angle in results:
+            voxel_angles[(k, i, j)].append(angle)
+        kam_map = np.full(orientation_map.shape[:3], fill_value)
+        for (k, i, j), angles in voxel_angles.items():
+            kam_map[k, i, j] = np.nanmean(angles)
+    
+    return kam_map[int(kernel_size/2)+1 : -int(kernel_size/2)-1, int(kernel_size/2)+1 : -int(kernel_size/2)-1, int(kernel_size/2)+1 : -int(kernel_size/2)-1]
+
+def get_boundary_voxels(label_map):
+    """
+    Given a 3D label map of shape (Z, Y, X), return a binary volume
+    where True marks voxels on the boundary between two different labels.
+    Inputs:
+    label_map : shape (Z, Y, X) Integer label volume.
+    Outputs:
+    boundary : shape (Z, Y, X)
+    """
+    L = label_map
+    boundary = np.zeros(L.shape, dtype=bool)
+    # # Along Z
+    # boundary[:-1, :, :] |= (L[:-1, :, :] != L[1:,  :, :])
+    # Along Y
+    boundary[:, :-1, :] |= (L[:, :-1, :] != L[:, 1:,  :])
+    # Along X
+    boundary[:, :, :-1] |= (L[:, :, :-1] != L[:, :, 1: ])
+    return boundary
+
+def DS_misori_parallel(DS, crystal_system = 'cubic', kernel_size = 5, fill_value = np.nan, n_jobs=-1,Umis=True):
+    """
+    compute Kernal Average Misorientation (KAM) on the grainmap (parallelized with joblib)
+    Args:
+        DS                          -- grain map 
+        kernel_size                 -- int, size of the kernel
+        crystal_system              -- crystal system name as str
+        fill_value                  -- To put where mask is false. Defaults to np.nan.
+        n_jobs                      -- Number of parallel jobs. -1 uses all available cores.
+        Umis                        -- Use Umis instead of disori list
+    Returns:
+        gb_mismap                   -- gb_mismap map in degrees (Z,Y,X)
+    """
+    if crystal_system in ['cubic', 'hexagonal', 'orthorhombic', 'tetragonal', 'trigonal', 'monoclinic', 'triclinic']:
+        print('{} is OK'.format(crystal_system))
+        crystal_structure = Symmetry[crystal_system]
+    else:
+        raise ValueError('{} is not supported.'.format(crystal_system))
+    if Umis:
+        Umis_list = ['triclinic', 'monoclinic', 'orthorombic', 'tetragonal','trigonal', 'hexagonal', 'cubic']
+        n_Umis = Umis_list.index(crystal_system.lower())+1
+        try:
+            from xfab.symmetry import Umis
+        except ImportError:
+            raise ImportError('Can not import Umis from xfab, defaulting to disori_list')
+            Umis =False
+    gb = get_boundary_voxels(DS['labels'])
+    kernel = KAM_kernel(kernel_size)
+    q = kernel_size // 2
+    m = kernel_size // 2
+    n = kernel_size // 2
+    #### Adding some padding ####
+    pad_width = [(int(kernel_size/2+1), int(kernel_size/2+1)),   # axis 0 (Z axis) --> add 1 slice before and 1 after
+                (int(kernel_size/2+1), int(kernel_size/2+1)),   # axis 1
+                (int(kernel_size/2+1), int(kernel_size/2+1)),   # axis 2
+                (0, 0),   # axis 3
+                (0, 0)]   # axis 4
+    pad_width_gb = [(int(kernel_size/2+1), int(kernel_size/2+1)),   # axis 0 --> add 1 slice before and 1 after
+                    (int(kernel_size/2+1), int(kernel_size/2+1)),   # axis 1
+                    (int(kernel_size/2+1), int(kernel_size/2+1))]   # axis 2
+    orientation_map = np.pad(DS['U'], pad_width, mode='constant', constant_values=0)
+    gb = np.pad(gb, pad_width_gb, mode='constant', constant_values=0)
+    if Umis ==False:
+            # --- Collect all voxel coordinates on GB---
+        valid_coords = [
+            (k, i, j)
+            for k in range(q, orientation_map.shape[0] - q)
+            for i in range(m, orientation_map.shape[1] - m)
+            for j in range(n, orientation_map.shape[2] - n)
+            if gb[k, i, j]
+        ]
+        def process_voxel(k, i, j):
+            """For one voxel: gather neighbors, call disorientation_list, return mean angle."""
+            coo_neighbors = find_neighbors(np.array([k, i, j]), kernel)
+            center = orientation_map[k, i, j]                              # (3, 3)
+            neighbors = np.array([orientation_map[c[0], c[1], c[2]].T
+                                   for c in coo_neighbors])                # (K, 3, 3)
+            centers = np.tile(center.T, (len(neighbors), 1, 1))              # (K, 3, 3)
+    
+            angles, _, _ = disorientation_list(centers, neighbors, crystal_structure)
+            angles = np.rad2deg(np.array(angles))
+            
+            for g in range(len(angles)):
+                if np.allclose(neighbors[g], 0) or np.allclose(centers[g], 0):
+                    angles[g] = np.nan
+            # angles[(angles >= min_angle) & (angles <= max_angle)];
+            angle_mean = np.nanmean(angles)
+            return (k, i, j, angle_mean)
+        print(f"Processing {len(valid_coords)} valid voxels with n_jobs={n_jobs}...")
+        results = Parallel(n_jobs=n_jobs, verbose=5)(
+            delayed(process_voxel)(k, i, j) for k, i, j in valid_coords
+        )
+        # build gb_mis_map
+        gb_mis_map = np.full(orientation_map.shape[:3], fill_value)
+        for k, i, j, val in results:
+            gb_mis_map[k, i, j] = val
+    else:
+        # Each valid voxel contributes K pairs (one per neighbor)
+        pairs = [
+            (k, i, j, orientation_map[k, i, j], orientation_map[c[0], c[1], c[2]])
+            for k in range(q, orientation_map.shape[0] - q)
+            for i in range(m, orientation_map.shape[1] - m)
+            for j in range(n, orientation_map.shape[2] - n)
+            if gb[k, i, j]
+            for c in find_neighbors(np.array([k, i, j]), kernel)
+        ]
+        print(f"Processing {len(pairs)} pairs across {n_jobs} jobs...")
+        def compute_umis(k, i, j, U_center, U_neighbor):
+            if np.allclose(U_center, 0) or np.allclose(U_neighbor, 0):
+                return (k, i, j, np.nan)
+            angle = Umis(U_center, U_neighbor, n_Umis)[:,1].min()
+            return (k, i, j, angle)
+        results = Parallel(n_jobs=n_jobs, verbose=5)(
+            delayed(compute_umis)(k, i, j, U_c, U_n) for k, i, j, U_c, U_n in pairs
+        )
+        #--- Accumulate angles per voxel then average ---
+        from collections import defaultdict
+        voxel_angles = defaultdict(list)
+        #each voxel position is associated with the misroi angle corresponding
+        for k, i, j, angle in results:
+            voxel_angles[(k, i, j)].append(angle)
+        gb_mis_map = np.full(orientation_map.shape[:3], fill_value)
+        for (k, i, j), angles in voxel_angles.items():
+            gb_mis_map[k, i, j] = np.nanmean(angles)
+    return gb_mis_map[int(kernel_size/2)+1 : -int(kernel_size/2)-1, int(kernel_size/2)+1 : -int(kernel_size/2)-1, int(kernel_size/2)+1 : -int(kernel_size/2)-1]
+    
 # this class comes from pymicro/crystal/lattice.py
 class Symmetry(enum.Enum):
     """
