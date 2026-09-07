@@ -386,20 +386,20 @@ class forward_projector:
 
     def check_halfy(self):
         # quick check to see if halfy is big enough to include all sample voxels to be illuminated
+        # mask is ZYX format
         if self.sample_mask is None:
             mask_tmp = (self.sample_input.DS['labels'] > -1) & (~np.isnan(self.sample_input.DS['U'][:, :, :, 0, 0]))
-            mask_tmp = np.transpose(mask_tmp, (2, 1, 0))
         else:
             mask_tmp = self.sample_mask
-        center = (mask_tmp.shape[0]/2, mask_tmp.shape[1]/2)
+        center = (mask_tmp.shape[1]/2, mask_tmp.shape[2]/2)
         radius = self.args["halfy"]/np.mean(self.sample_input.DS['voxel_size']) # radius covered by halfy, [pixel]
-        x = np.linspace(0, mask_tmp.shape[1], mask_tmp.shape[1])
-        y = np.linspace(0, mask_tmp.shape[0], mask_tmp.shape[0])
+        x = np.linspace(0, mask_tmp.shape[2], mask_tmp.shape[2])
+        y = np.linspace(0, mask_tmp.shape[1], mask_tmp.shape[1])
         xv, yv = np.meshgrid(x, y)
         dist_from_center = np.sqrt((xv - center[0])**2 + (yv-center[1])**2)
         mask_circle = dist_from_center >= radius
-        combine_mask = mask_circle*mask_tmp[:,:,0]
-        if self.verbose >= 1 and np.sum(combine_mask)>=1:
+        combine_mask = mask_circle*mask_tmp[0,:,:]
+        if self.verbose >= 1 and np.nansum(combine_mask)>=1:
             logging.warning('****** WARNING ******')
             logging.info('halfy = {} um is too small, you should increase to ~{:6f} um.'.format(self.args["halfy"],
                          self.args["halfy"] + 2.5*np.sum(combine_mask)/(2*np.pi*radius)*np.mean(self.sample_input.DS['voxel_size'])))
